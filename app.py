@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import tempfile
 
@@ -16,19 +17,17 @@ st.write("Upload a video and get it back with the background track added.")
 
 
 def get_duration(path: str) -> float:
-    """Use ffprobe (bundled alongside ffmpeg by imageio-ffmpeg) to get duration in seconds."""
-    ffprobe_exe = FFMPEG_EXE.replace("ffmpeg", "ffprobe")
-    try:
-        result = subprocess.run(
-            [ffprobe_exe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrapper=1:nokey=1", path],
-            capture_output=True, text=True, check=True,
-        )
-        return float(result.stdout.strip())
-    except Exception:
-        # Fallback: ask ffmpeg itself to report duration if ffprobe isn't available
-        result = subprocess.run([FFMPEG_EXE, "-i", path], capture_output=True, text=True)
-        return 0.0
+    """
+    Get duration in seconds by parsing ffmpeg's own stderr output.
+    (imageio-ffmpeg only bundles ffmpeg, not ffprobe, so we can't shell out
+    to ffprobe here - ffmpeg -i on its own reports duration to stderr.)
+    """
+    result = subprocess.run([FFMPEG_EXE, "-i", path], capture_output=True, text=True)
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", result.stderr)
+    if not match:
+        raise RuntimeError("Could not determine video duration - the uploaded file may be invalid.")
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def process_video(input_path: str, output_path: str):
