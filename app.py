@@ -1,41 +1,58 @@
-import math
 import os
+import subprocess
 import tempfile
 
 import streamlit as st
-from moviepy import VideoFileClip, AudioFileClip, concatenate_audioclips
+import imageio_ffmpeg
 
 # Background audio file must sit next to this script in the repo
 AUDIO_PATH = "background_audio.mp3"
+
+FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 
 st.set_page_config(page_title="Video Audio Swapper", page_icon="🎬")
 st.title("🎬 Video Audio Swapper")
 st.write("Upload a video and get it back with the background track added.")
 
 
-def loop_audio_to_length(audio: AudioFileClip, target_duration: float) -> AudioFileClip:
-    if audio.duration >= target_duration:
-        return audio.subclipped(0, target_duration)
-    n_loops = math.ceil(target_duration / audio.duration)
-    looped = concatenate_audioclips([audio] * n_loops)
-    return looped.subclipped(0, target_duration)
+def get_duration(path: str) -> float:
+    """Use ffprobe (bundled alongside ffmpeg by imageio-ffmpeg) to get duration in seconds."""
+    ffprobe_exe = FFMPEG_EXE.replace("ffmpeg", "ffprobe")
+    try:
+        result = subprocess.run(
+            [ffprobe_exe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrapper=1:nokey=1", path],
+            capture_output=True, text=True, check=True,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        # Fallback: ask ffmpeg itself to report duration if ffprobe isn't available
+        result = subprocess.run([FFMPEG_EXE, "-i", path], capture_output=True, text=True)
+        return 0.0
 
 
 def process_video(input_path: str, output_path: str):
-    video = VideoFileClip(input_path)
-    audio = AudioFileClip(AUDIO_PATH)
-    new_audio = loop_audio_to_length(audio, video.duration)
-    final = video.with_audio(new_audio)
-    final.write_videofile(
+    """
+    Fast path: copy the original video stream as-is (no re-encoding) and only
+    swap/encode the audio track. This is dramatically faster than re-encoding
+    the whole video, since video encoding is by far the slow part.
+    """
+    video_dur = get_duration(input_path)
+
+    cmd = [
+        FFMPEG_EXE, "-y",
+        "-i", input_path,
+        "-stream_loop", "-1", "-i", AUDIO_PATH,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy",          # <- no video re-encode: this is the speed win
+        "-c:a", "aac", "-b:a", "192k",
+        "-t", str(video_dur),
+        "-shortest",
         output_path,
-        codec="libx264",
-        audio_codec="aac",
-        audio_bitrate="192k",
-        logger=None,
-    )
-    video.close()
-    audio.close()
-    final.close()
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip().splitlines()[-1] if result.stderr else "ffmpeg failed")
 
 
 if not os.path.isfile(AUDIO_PATH):
